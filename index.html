@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#2056a0">
+<title>Cadastro de participantes</title>
+<style>
+*{box-sizing:border-box}body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#f2f5fa;color:#1e293b;margin:0;padding:24px}.wrap{max-width:680px;margin:auto}.card{background:#fff;border-radius:16px;padding:26px;box-shadow:0 6px 24px #0001}h1{margin-top:0}label{display:block;margin:16px 0 6px;font-weight:650}input{width:100%;padding:13px;border:1px solid #bbc5d4;border-radius:8px;font:inherit}button{background:#2056a0;color:white;border:0;border-radius:8px;padding:13px 20px;font:inherit;font-weight:700;cursor:pointer;margin-top:16px}button:disabled{opacity:.6;cursor:wait}.small{color:#64748b;font-size:14px;line-height:1.45}.status{display:none;padding:12px;border-radius:8px;margin:12px 0;white-space:pre-wrap}.status.show{display:block}.status.ok{background:#e7f6ed;color:#155c38}.status.err{background:#fff0f0;color:#8e2020}#result{display:none;text-align:center;border-top:1px solid #ddd;margin-top:24px;padding-top:20px}#qrcode{display:flex;justify-content:center;margin:18px}#qrcode canvas,#qrcode img{max-width:100%;height:auto}.actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:center}.secondary{background:#475569}@media(max-width:520px){body{padding:12px}.card{padding:18px}}@media print{body *{visibility:hidden}#result,#result *{visibility:visible}#result{position:absolute;left:0;top:0;width:100%;border:0}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <h1>Cadastro de participantes</h1>
+    <p class="small">Informe seu nome e CPF para registrar o cadastro e gerar seu QR Code.</p>
+    <div id="status" class="status"></div>
+    <form id="form">
+      <label for="nome">Nome completo</label>
+      <input id="nome" autocomplete="name" required maxlength="150" placeholder="Seu nome completo">
+      <label for="cpf">CPF</label>
+      <input id="cpf" inputmode="numeric" autocomplete="off" required maxlength="14" placeholder="000.000.000-00">
+      <button id="submitBtn" type="submit">Cadastrar e gerar QR Code</button>
+    </form>
+    <section id="result">
+      <h2>Cadastro realizado!</h2>
+      <strong id="outNome"></strong>
+      <p id="outCpf" class="small"></p>
+      <div id="qrcode"></div>
+      <p class="small">Apresente este QR Code à equipe responsável. O QR Code contém um identificador aleatório, não o CPF.</p>
+      <div class="actions"><button type="button" id="printBtn">Imprimir QR Code</button><button type="button" id="newBtn" class="secondary">Novo cadastro</button></div>
+    </section>
+    <p class="small">Seus dados são enviados ao banco central do evento. Use somente os dados solicitados pela organização.</p>
+  </div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script src="./config.js"></script>
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const cfg = window.EVENTO_CONFIG || {};
+  let supabaseClient = null;
+
+  function showStatus(message, isError=false) {
+    const el = $('status');
+    el.textContent = message;
+    el.className = 'status show ' + (isError ? 'err' : 'ok');
+  }
+  function digits(value) { return String(value || '').replace(/\D/g, ''); }
+  function formatCPF(value) {
+    const d = digits(value).slice(0,11);
+    if(d.length <= 3) return d;
+    if(d.length <= 6) return d.slice(0,3)+'.'+d.slice(3);
+    if(d.length <= 9) return d.slice(0,3)+'.'+d.slice(3,6)+'.'+d.slice(6);
+    return d.slice(0,3)+'.'+d.slice(3,6)+'.'+d.slice(6,9)+'-'+d.slice(9,11);
+  }
+  function validCPF(value) {
+    const c = digits(value);
+    if(c.length !== 11 || /^(\d)\1{10}$/.test(c)) return false;
+    let sum=0;
+    for(let i=0;i<9;i++) sum += Number(c[i])*(10-i);
+    let r=(sum*10)%11; if(r===10) r=0;
+    if(r!==Number(c[9])) return false;
+    sum=0;
+    for(let i=0;i<10;i++) sum += Number(c[i])*(11-i);
+    r=(sum*10)%11; if(r===10) r=0;
+    return r===Number(c[10]);
+  }
+  function uuid() {
+    if(window.crypto && crypto.randomUUID) return crypto.randomUUID();
+    if(window.crypto && crypto.getRandomValues) {
+      const b = new Uint8Array(16); crypto.getRandomValues(b);
+      b[6]=(b[6]&0x0f)|0x40; b[8]=(b[8]&0x3f)|0x80;
+      const h=Array.from(b,x=>x.toString(16).padStart(2,'0')).join('');
+      return h.slice(0,8)+'-'+h.slice(8,12)+'-'+h.slice(12,16)+'-'+h.slice(16,20)+'-'+h.slice(20);
+    }
+    throw new Error('Este navegador não oferece geração segura de identificadores.');
+  }
+  function init() {
+    if(!window.supabase) {
+      showStatus('Não foi possível carregar a biblioteca do Supabase. Verifique sua conexão com a internet e atualize a página.', true);
+      $('submitBtn').disabled = true; return;
+    }
+    if(!cfg.url || !cfg.anonKey) {
+      showStatus('Não encontrei a configuração. Confira se config.js está na mesma pasta que index.html.', true);
+      $('submitBtn').disabled = true; return;
+    }
+    try {
+      supabaseClient = window.supabase.createClient(cfg.url, cfg.anonKey);
+      $('status').className = 'status';
+    } catch(e) {
+      showStatus('Erro na configuração do Supabase: '+e.message, true);
+      $('submitBtn').disabled = true;
+    }
+  }
+  $('cpf').addEventListener('input', e => { e.target.value = formatCPF(e.target.value); });
+  $('form').addEventListener('submit', async e => {
+    e.preventDefault();
+    $('result').style.display='none';
+    const nome=$('nome').value.trim().replace(/\s+/g,' ');
+    const cpf=digits($('cpf').value);
+    if(nome.length<3) { showStatus('Informe o nome completo.', true); return; }
+    if(!validCPF(cpf)) { showStatus('CPF inválido. Confira os números digitados.', true); return; }
+    if(!supabaseClient) { showStatus('A conexão com o banco não foi iniciada. Confira config.js e atualize a página.', true); return; }
+    if(typeof QRCode === 'undefined') { showStatus('A biblioteca de QR Code não carregou. Verifique a internet e atualize a página.', true); return; }
+    let token;
+    try { token=uuid(); } catch(err) { showStatus(err.message,true); return; }
+
+    $('submitBtn').disabled=true;
+    $('submitBtn').textContent='Salvando cadastro…';
+    // municipality is filled with a default to remain compatible with the existing table schema.
+    // No SELECT is performed, so the public form cannot read the participant list or CPF data.
+    const {error} = await supabaseClient.from('participants').insert({
+      name: nome,
+      cpf: cpf,
+      municipality: 'Não informado',
+      qr_token: token
+    });
+    $('submitBtn').disabled=false;
+    $('submitBtn').textContent='Cadastrar e gerar QR Code';
+
+    if(error) {
+      if(error.code === '23505') {
+        showStatus('Este CPF já está cadastrado. Se você acredita que isso é um erro, procure a equipe do evento.', true);
+      } else if(error.code === '42501' || error.code === 'PGRST301') {
+        showStatus('O banco recusou o cadastro por causa das permissões. É necessário habilitar a política de inserção pública no Supabase conforme o arquivo supabase_setup.sql.', true);
+      } else {
+        showStatus('Não foi possível salvar no banco: '+error.message+' (código '+(error.code||'sem código')+').', true);
+      }
+      return;
+    }
+    $('outNome').textContent=nome;
+    $('outCpf').textContent='CPF: ***.***.'+cpf.slice(6,9)+'-'+cpf.slice(9);
+    $('qrcode').replaceChildren();
+    new QRCode($('qrcode'), {text:token, width:240, height:240, colorDark:'#000000', colorLight:'#ffffff', correctLevel:QRCode.CorrectLevel.M});
+    $('result').style.display='block';
+    showStatus('Cadastro salvo no banco central e QR Code gerado.');
+    $('result').scrollIntoView({behavior:'smooth',block:'start'});
+  });
+  $('printBtn').addEventListener('click',()=>window.print());
+  $('newBtn').addEventListener('click',()=>{
+    $('form').reset(); $('result').style.display='none'; $('status').className='status';
+    $('nome').focus();
+  });
+  init();
+})();
+</script>
+</body>
+</html>
